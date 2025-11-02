@@ -2,42 +2,81 @@ import os
 import json
 import psycopg2
 from dotenv import load_dotenv
-from parser import parse_requisites
+from parser import parse_requisites   # your parser.py from before
 
-load_dotenv()  # loads DATABASE_URL from .env
+# Load environment
+load_dotenv()
 DB_URL = os.getenv("DATABASE_URL")
 
-def process_requisites():
+
+# --------------------------------------
+# Utilities
+# --------------------------------------
+def load_subjects(conn):
+    """Load subject names & codes from DB once, for fast in-memory lookup."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, code, name FROM subject_areas;")
+        rows = cur.fetchall()
+
+    # Build lowercase sets for quick lookup
+    names = {r[2].lower() for r in rows}
+    codes = {r[1].lower(): r[2] for r in rows}   # map code → name
+    id_to_name = {r[0]: r[2] for r in rows}      # map id → canonical name
+    return names, codes, id_to_name
+
+
+def get_subject_hint(subject_id, id_to_name):
+    """Map subject_area_id from courses table to canonical subject name."""
+    return id_to_name.get(subject_id, None)
+
+
+# --------------------------------------
+# Main processor
+# --------------------------------------
+def process_requisites(limit_range=None):
+    """
+    limit_range: tuple (start_id, end_id) to restrict processing,
+    e.g. (205, 225)
+    """
     conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
+    valid_subjects, subject_codes, id_to_name = load_subjects(conn)
 
-    # Get subject area mapping (for inferring subject codes)
-    cur.execute("SELECT id, code FROM subject_areas;")
-    subject_lookup = {row[0]: row[1] for row in cur.fetchall()}
+    with conn.cursor() as cur:
+        base_query = "SELECT id, requisites_text, subject_area_id FROM courses WHERE requisites_text IS NOT NULL"
+        if limit_range:
+            base_query += f" AND id BETWEEN {limit_range[0]} AND {limit_range[1]}"
+        base_query += ";"
+        cur.execute(base_query)
+        rows = cur.fetchall()
 
-    cur.execute("""
-        SELECT id, subject_area_id, requisites_text
-        FROM courses
-        WHERE requisites_text IS NOT NULL;
-    """)
+        print(f"🔍 Found {len(rows)} courses to process")
 
-    courses = cur.fetchall()
-    print(f"Processing {len(courses)} courses...")
+        for course_id, text, subject_id in rows:
+            subj_hint = get_subject_hint(subject_id, id_to_name)
+            if not subj_hint or not text:
+                continue
 
-    for course_id, subject_area_id, text in courses:
-        subject_hint = subject_lookup.get(subject_area_id, "")
-        parsed = parse_requisites(text, subject_hint)
+            parsed = parse_requisites(text, subj_hint, valid_subjects)
 
-        cur.execute("""
-            UPDATE courses
-            SET requisites_parsed = %s
-            WHERE id = %s;
-        """, (json.dumps(parsed), course_id))
+            cur.execute("""
+                UPDATE courses
+                SET requisites_parsed = %s
+                WHERE id = %s;
+            """, (json.dumps(parsed), course_id))
+
+            print(f"✅ Updated course {course_id}: {subj_hint}")
 
     conn.commit()
-    print("✅ Updated requisites_parsed for all courses.")
-    cur.close()
     conn.close()
+    print("🎉 Done updating requisites.")
 
+
+# --------------------------------------
+# Entry point
+# --------------------------------------
 if __name__ == "__main__":
-    process_requisites()
+    # Example: process a small range for testing
+    process_requisites((205, 225))
+
+    # Or uncomment to process all
+    #process_requisites()
