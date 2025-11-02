@@ -44,7 +44,12 @@ def process_requisites(limit_range=None):
     valid_subjects, subject_codes, id_to_name = load_subjects(conn)
 
     with conn.cursor() as cur:
-        base_query = "SELECT id, requisites_text, subject_area_id FROM courses WHERE requisites_text IS NOT NULL"
+        base_query = """
+            SELECT id, requisites_text, subject_area_id
+            FROM courses
+            WHERE requisites_text IS NOT NULL
+            AND requisites_parsed IS NULL
+        """
         if limit_range:
             base_query += f" AND id BETWEEN {limit_range[0]} AND {limit_range[1]}"
         base_query += ";"
