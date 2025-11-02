@@ -1,72 +1,114 @@
 import re
 import json
 
-def parse_requisites(raw_text: str, subject_hint: str, valid_subjects=None):
+# ------------------------------------------------------
+# 1️⃣ Classifier — decide which parser to use
+# ------------------------------------------------------
+def classify_requisite(raw_text: str) -> str:
+    """Classify a requisite string as 'basic' or 'advanced'."""
+    text = raw_text.lower()
+
+    # Keywords that indicate complex logic (handled later by advanced parser)
+    if any(
+        kw in text
+        for kw in [
+            "one course from",
+            "either",
+            "both",
+            "must also",
+            "may be taken concurrently",
+            "and one of",
+            "and one course from",
+        ]
+    ):
+        return "advanced"
+
+    # Simple course lists or single-course enforcement
+    if re.search(r"\bcourses?\b", text) or re.search(r"\bor\b", text):
+        return "basic"
+
+    # Default to basic for short patterns (single course, enforced)
+    if len(text.split()) <= 8:
+        return "basic"
+
+    return "advanced"
+
+
+# ------------------------------------------------------
+# 2️⃣ Basic parser — handles short and regular forms
+# ------------------------------------------------------
+def parse_basic(raw_text: str, subject_hint: str, valid_subjects=None):
     """
-    Parse prerequisite strings like:
-    "Requisites: course 32 or Program in Computing 10C; Civil and Environmental Engineering 110 or
-    Electrical and Computer Engineering 131A or Mathematics 170A or 170E or Statistics 100A; Mathematics 33A."
+    Parse simple patterns like:
+      - 'Enforced requisite: course 31.'
+      - 'Requisites: courses 111, 131.'
+      - 'Requisites: Engineering 183EW or 185EW.'
     """
 
-    results = []
-    req_type = "unenforced"
     text = raw_text.strip()
+    req_type = "enforced" if text.lower().startswith("enforced") else "unenforced"
 
-    # --- Detect enforced/unenforced ---
-    if text.lower().startswith("enforced"):
-        req_type = "enforced"
-        text = re.sub(r"(?i)enforced requisites?:", "", text)
-    else:
-        text = re.sub(r"(?i)\b(requisites?):", "", text)
+    # Remove header labels
+    text = re.sub(r"(?i)enforced requisites?:", "", text)
+    text = re.sub(r"(?i)requisites?:", "", text)
+    text = re.sub(r"(?i)requisite:", "", text)
+    text = text.strip(". ").strip()
 
-    # --- Clean ---
-    text = re.sub(r"with grade of [A-F][+-]? or better", "", text, flags=re.I)
-    text = re.sub(r"\bcourses?\b", "course", text, flags=re.I)
-    text = re.sub(r"\s+", " ", text).strip()
-
-    # --- Split into semicolon-delimited requirement blocks (AND groups) ---
-    blocks = [b.strip() for b in text.split(";") if b.strip()]
-    groups = []
-
-    course_pattern = re.compile(
-        r'([A-Z][A-Za-z]*(?: (?:and|in|of|for|to|the|&|and the|and of|and in|and for|and to|and&) [A-Z][A-Za-z]*)*)?\s*(\d+[A-Z]?)'
+    # Split into course tokens
+    # Examples: ("Computer Science", "32"), ("", "31"), ("Engineering", "183EW")
+    pattern = re.compile(
+        r'([A-Z][A-Za-z]*(?: [A-Z][A-Za-z]*)*)?\s*(\d+[A-Z]?(?:[A-Z])?)'
     )
+    matches = pattern.findall(text)
 
-    for block in blocks:
-        or_parts = re.split(r"\bor\b", block, flags=re.I)
-        current_subject = None
-        courses = []
+    if not matches:
+        return None
 
-        for part in or_parts:
-            part = part.strip()
-            matches = course_pattern.findall(part)
+    courses = []
+    current_subject = subject_hint
 
-            for subj, num in matches:
-                subj = subj.strip() if subj.strip() else current_subject or subject_hint
-                inferred = subj == subject_hint
-                current_subject = subj
+    for subj, num in matches:
+        subj = subj.strip() if subj.strip() else current_subject
+        inferred = subj.lower() == subject_hint.lower()
 
-                # Normalize capitalization
-                subj = re.sub(r"\s+", " ", subj).strip()
-                subj = subj.title() if subj.isupper() else subj
+        # Validate against subject list (optional)
+        if valid_subjects is not None and subj.lower() not in [s.lower() for s in valid_subjects]:
+            subj = subject_hint
+            inferred = True
 
-                # ✅ Optional DB validation
-                if valid_subjects is not None:
-                    if subj.lower() not in valid_subjects:
-                        # fallback to hint if invalid
-                        subj = subject_hint
-                        inferred = True
+        courses.append({
+            "subject": subj,
+            "number": num,
+            "inferred": inferred
+        })
 
-                courses.append({
-                    "subject": subj,
-                    "number": num,
-                    "inferred": inferred
-                })
+    # Group all courses with OR (since basic cases are usually alternatives or lists)
+    result = {
+        "requisites": [
+            {
+                "type": req_type,
+                "groups": [
+                    {
+                        "operator": "OR",
+                        "courses": courses
+                    }
+                ]
+            }
+        ]
+    }
 
-        if courses:
-            groups.append({"operator": "OR", "courses": courses})
+    return result
 
-    if groups:
-        results.append({"type": req_type, "groups": groups})
 
-    return {"requisites": results}
+# ------------------------------------------------------
+# 3️⃣ Unified entrypoint — used by main.py
+# ------------------------------------------------------
+def parse_requisites(raw_text: str, subject_hint: str, valid_subjects=None):
+    """Top-level entry: classify and route parsing logic."""
+    category = classify_requisite(raw_text)
+
+    if category == "basic":
+        return parse_basic(raw_text, subject_hint, valid_subjects)
+
+    # For advanced/unhandled patterns → return None so DB remains NULL
+    return None

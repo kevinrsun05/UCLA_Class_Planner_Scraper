@@ -2,9 +2,11 @@ import os
 import json
 import psycopg2
 from dotenv import load_dotenv
-from parser import parse_requisites   # your parser.py from before
+from parser import parse_requisites   # from parser.py above
 
-# Load environment
+# --------------------------------------
+# Environment
+# --------------------------------------
 load_dotenv()
 DB_URL = os.getenv("DATABASE_URL")
 
@@ -51,6 +53,9 @@ def process_requisites(limit_range=None):
 
         print(f"🔍 Found {len(rows)} courses to process")
 
+        updated_count = 0
+        skipped_count = 0
+
         for course_id, text, subject_id in rows:
             subj_hint = get_subject_hint(subject_id, id_to_name)
             if not subj_hint or not text:
@@ -58,17 +63,22 @@ def process_requisites(limit_range=None):
 
             parsed = parse_requisites(text, subj_hint, valid_subjects)
 
+            # ❗ Skip if parser returned None (non-basic case)
+            if parsed is None:
+                skipped_count += 1
+                continue
+
             cur.execute("""
                 UPDATE courses
                 SET requisites_parsed = %s
                 WHERE id = %s;
             """, (json.dumps(parsed), course_id))
-
+            updated_count += 1
             print(f"✅ Updated course {course_id}: {subj_hint}")
 
     conn.commit()
     conn.close()
-    print("🎉 Done updating requisites.")
+    print(f"🎉 Done updating requisites. Updated: {updated_count}, Skipped (advanced): {skipped_count}")
 
 
 # --------------------------------------
@@ -76,7 +86,7 @@ def process_requisites(limit_range=None):
 # --------------------------------------
 if __name__ == "__main__":
     # Example: process a small range for testing
-    process_requisites((205, 225))
+    #process_requisites((205, 225))
 
     # Or uncomment to process all
-    #process_requisites()
+    process_requisites()
